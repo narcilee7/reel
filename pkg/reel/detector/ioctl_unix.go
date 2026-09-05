@@ -3,6 +3,7 @@
 package detector
 
 import (
+	"os"
 	"syscall"
 	"unsafe"
 )
@@ -20,4 +21,18 @@ func winSizeOf(fd uintptr) (rows, cols, pxW, pxH int, err error) {
 		return 0, 0, 0, 0, errno
 	}
 	return int(ws.Row), int(ws.Col), int(ws.Xpixel), int(ws.Ypixel), nil
+}
+
+// ReprobeGeometry refreshes the terminal cell and grid size from the OS. It
+// is the cheap L4 re-probe used by Engine.Reprobe for TUI resize handling.
+func ReprobeGeometry() (cell, grid Size, err error) {
+	rows, cols, pxW, pxH, err := winSizeOf(os.Stdout.Fd())
+	if err != nil || cols <= 0 {
+		return Size{}, Size{}, err
+	}
+	grid = Size{Width: cols, Height: rows}
+	if rows > 0 && pxW > 0 {
+		cell = Size{Width: pxW / cols, Height: pxH / rows}
+	}
+	return cell, grid, nil
 }

@@ -11,6 +11,15 @@ type config struct {
 	maxHeight  int
 }
 
+// Size is a width/height pair in pixels or cells.
+type Size = detector.Size
+
+// ProtocolHint records that a terminal supports a named protocol at a level.
+type ProtocolHint = detector.ProtocolHint
+
+// TerminalProfile is the cached result of probing the terminal.
+type TerminalProfile = detector.TerminalProfile
+
 // Option configures Engine construction.
 type Option func(*config)
 

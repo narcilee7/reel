@@ -42,6 +42,13 @@ func (k ContentKind) String() string {
 type Context struct {
 	// SourceDir is the directory of the source file, when there is one.
 	SourceDir string
+	// CellSize is the terminal cell in pixels; zero means unknown.
+	CellSize detector.Size
+	// MaxCells is the render area in cells (terminal grid or
+	// MaxWidth/MaxHeight); zero means unknown.
+	MaxCells detector.Size
+	// ColorDepth is the terminal color depth (256 / 1<<24); zero means unknown.
+	ColorDepth int
 }
 
 // SupportLevel describes how fully a terminal supports an image protocol.
@@ -115,6 +122,16 @@ func (*ImageFragment) fragmentTag() {}
 type RenderOptions struct {
 	MaxWidth  int // max image width in terminal cells; zero = no limit
 	MaxHeight int // max image height in terminal cells; zero = no limit
+
+	// CellSize is the terminal cell in pixels (from detector L4). Zero means
+	// unknown; protocols fall back to their Phase 1 assumptions.
+	CellSize detector.Size
+
+	// PlacementBase is the first placement id this Write call may use. Kitty
+	// assigns ids PlacementBase, PlacementBase+1, ... per image, so the caller
+	// can later delete them. Zero means ids are not addressable (the protocol
+	// picks its own, e.g. i=0).
+	PlacementBase uint32
 }
 
 // Capabilities describes the upper limits of a protocol.
@@ -135,30 +152,40 @@ type Protocol interface {
 	Capabilities() Capabilities
 }
 
-// Registry is an ordered set of protocols, best first.
+// Registry is an ordered set of protocol factories, best first. Factories
+// (rather than shared protocol values) let each Engine hold protocol
+// instances with independent mutable state such as placement id counters.
 type Registry struct {
-	protocols []Protocol
+	factories []func() Protocol
 }
 
 // DefaultRegistry returns the built-in protocol registry, ordered by
 // preference: Kitty, iTerm2, Sixel, AnsiArt, Plain.
 func DefaultRegistry() *Registry {
-	return &Registry{protocols: []Protocol{
-		&kittyProtocol{},
-		&iterm2Protocol{},
-		&sixelProtocol{},
-		&ansiArtProtocol{},
-		&plainProtocol{},
+	return &Registry{factories: []func() Protocol{
+		func() Protocol { return &kittyProtocol{} },
+		func() Protocol { return &iterm2Protocol{} },
+		func() Protocol { return &sixelProtocol{} },
+		func() Protocol { return &ansiArtProtocol{} },
+		func() Protocol { return &plainProtocol{} },
 	}}
 }
 
 // Select returns the highest-priority protocol hinted by the profile,
 // falling back to Plain when nothing is supported.
 func (r *Registry) Select(profile *detector.TerminalProfile) Protocol {
-	for _, p := range r.protocols {
+	for _, f := range r.factories {
+		p := f()
 		if hint, ok := profile.Supports(p.Name()); ok && hint.Level >= detector.SupportStatic {
 			return p
 		}
 	}
 	return &plainProtocol{}
+}
+
+// ImageDeleter is an optional capability implemented by protocols that can
+// remove previously placed images (Kitty a=d). Assert, don't require.
+type ImageDeleter interface {
+	// DeleteImages removes the images with the given placement ids.
+	DeleteImages(w io.Writer, ids ...uint32) error
 }

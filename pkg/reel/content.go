@@ -2,7 +2,10 @@
 // with Load (or LoadImage/LoadMarkdown), and render with Engine.Render.
 package reel
 
-import "github.com/narcilee7/reel/pkg/reel/protocol"
+import (
+	"github.com/narcilee7/reel/pkg/reel/detector"
+	"github.com/narcilee7/reel/pkg/reel/protocol"
+)
 
 // ContentKind classifies source content.
 type ContentKind = protocol.ContentKind
@@ -15,6 +18,16 @@ const (
 
 // Context carries ambient per-render information into Content.ToIR.
 type Context = protocol.Context
+
+// SupportLevel describes how fully a terminal supports an image protocol.
+type SupportLevel = detector.SupportLevel
+
+const (
+	SupportNone      = detector.SupportNone
+	SupportStatic    = detector.SupportStatic
+	SupportAnimation = detector.SupportAnimation
+	SupportNative    = detector.SupportNative
+)
 
 // IntermediateRep is the protocol-agnostic rendering intermediate
 // representation, re-exported from the protocol package.

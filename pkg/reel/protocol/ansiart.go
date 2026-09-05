@@ -2,37 +2,60 @@ package protocol
 
 import (
 	"fmt"
-	"image"
-	"image/color"
 	"io"
 
 	"github.com/narcilee7/reel/pkg/reel/detector"
-	"github.com/narcilee7/reel/pkg/reel/layout"
+	"github.com/narcilee7/reel/pkg/reel/encoder"
 )
 
 // ansiArtProtocol approximates images with Unicode half blocks (▀): the
 // foreground color paints the upper half of a cell, the background color the
 // lower half, giving two vertical pixels per cell in TrueColor terminals.
+//
+// ansiArtProtocol256 is the 256-color variant: identical sampling, but colors
+// are quantized to the xterm palette and emitted as 38;5;n / 48;5;n. The
+// Engine picks the variant matching the terminal's color depth.
 type ansiArtProtocol struct{}
 
+type ansiArtProtocol256 struct{}
+
 func (p *ansiArtProtocol) Name() string { return "ansiart" }
+
+func (p *ansiArtProtocol256) Name() string { return "ansiart" }
 
 func (p *ansiArtProtocol) Detect(env *detector.Environment) (SupportLevel, error) {
 	return detector.SupportStatic, nil
 }
 
-func (p *ansiArtProtocol) Capabilities() Capabilities {
-	return Capabilities{}
+func (p *ansiArtProtocol256) Detect(env *detector.Environment) (SupportLevel, error) {
+	return detector.SupportStatic, nil
 }
 
+func (p *ansiArtProtocol) Capabilities() Capabilities { return Capabilities{} }
+
+func (p *ansiArtProtocol256) Capabilities() Capabilities { return Capabilities{} }
+
+// NewAnsiArt256 returns the 256-color AnsiArt protocol variant. The Engine
+// selects it for terminals whose color depth is known to be 256 or less; the
+// truecolor variant is what DefaultRegistry contains.
+func NewAnsiArt256() Protocol { return &ansiArtProtocol256{} }
+
 func (p *ansiArtProtocol) Write(w io.Writer, ir *IntermediateRep, opts *RenderOptions) error {
+	return writeAnsiArt(w, ir, opts, false)
+}
+
+func (p *ansiArtProtocol256) Write(w io.Writer, ir *IntermediateRep, opts *RenderOptions) error {
+	return writeAnsiArt(w, ir, opts, true)
+}
+
+func writeAnsiArt(w io.Writer, ir *IntermediateRep, opts *RenderOptions, quantize bool) error {
 	for _, f := range ir.Fragments {
 		var err error
 		switch t := f.(type) {
 		case *TextFragment:
 			err = writeText(w, t)
 		case *ImageFragment:
-			err = p.writeImage(w, t)
+			err = writeAnsiImage(w, t, opts, quantize)
 		}
 		if err != nil {
 			return err
@@ -41,9 +64,17 @@ func (p *ansiArtProtocol) Write(w io.Writer, ir *IntermediateRep, opts *RenderOp
 	return nil
 }
 
-func (p *ansiArtProtocol) writeImage(w io.Writer, f *ImageFragment) error {
-	img := f.Image
-	b := img.Bounds()
+// cellSizeOrDefault returns the terminal cell size from opts, falling back to
+// the Phase 1 assumption of 1×2 (cell aspect 1:2) when unknown.
+func cellSizeOrDefault(opts *RenderOptions) (int, int) {
+	if opts != nil && opts.CellSize.Width > 0 && opts.CellSize.Height > 0 {
+		return opts.CellSize.Width, opts.CellSize.Height
+	}
+	return 1, 2
+}
+
+func writeAnsiImage(w io.Writer, f *ImageFragment, opts *RenderOptions, quantize bool) error {
+	b := f.Image.Bounds()
 	if b.Empty() {
 		return writeText(w, &TextFragment{Text: "[image: " + f.Alt + "]\n"})
 	}
@@ -53,14 +84,24 @@ func (p *ansiArtProtocol) writeImage(w io.Writer, f *ImageFragment) error {
 		rect.Width, rect.Height = 40, 20
 	}
 
-	// Each cell holds two vertical samples; cells are assumed ~1:2 aspect.
+	// Sample on a canvas at the terminal's real cell resolution: each cell
+	// reads two points, the upper quarter (fg) and lower quarter (bg).
+	cw, ch := cellSizeOrDefault(opts)
+	canvas := encoder.BoxResize(f.Image, rect.Width*cw, rect.Height*ch)
 	for cy := 0; cy < rect.Height; cy++ {
 		for cx := 0; cx < rect.Width; cx++ {
-			top := sample(img, cx, cy*2, rect)
-			bottom := sample(img, cx, cy*2+1, rect)
-			if _, err := fmt.Fprintf(w, "\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm▀",
-				top.R, top.G, top.B, bottom.R, bottom.G, bottom.B); err != nil {
-				return err
+			top := canvas.RGBAAt(cx*cw+cw/2, cy*ch+ch/4)
+			bottom := canvas.RGBAAt(cx*cw+cw/2, cy*ch+3*ch/4)
+			if quantize {
+				if _, err := fmt.Fprintf(w, "\x1b[38;5;%dm\x1b[48;5;%dm▀",
+					encoder.Quantize256(top), encoder.Quantize256(bottom)); err != nil {
+					return err
+				}
+			} else {
+				if _, err := fmt.Fprintf(w, "\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm▀",
+					top.R, top.G, top.B, bottom.R, bottom.G, bottom.B); err != nil {
+					return err
+				}
 			}
 		}
 		if _, err := fmt.Fprint(w, "\x1b[0m\n"); err != nil {
@@ -68,19 +109,4 @@ func (p *ansiArtProtocol) writeImage(w io.Writer, f *ImageFragment) error {
 		}
 	}
 	return nil
-}
-
-// sample reads the image color at cell-sample coordinates, mapping
-// (sx, sy) in a rect.Width × rect.Height*2 grid onto the image.
-func sample(img image.Image, sx, sy int, rect layout.CellRect) color.RGBA {
-	b := img.Bounds()
-	ix := sx * b.Dx() / rect.Width
-	iy := sy * b.Dy() / (rect.Height * 2)
-	if ix >= b.Dx() {
-		ix = b.Dx() - 1
-	}
-	if iy >= b.Dy() {
-		iy = b.Dy() - 1
-	}
-	return color.RGBAModel.Convert(img.At(b.Min.X+ix, b.Min.Y+iy)).(color.RGBA)
 }

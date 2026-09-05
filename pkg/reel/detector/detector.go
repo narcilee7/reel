@@ -5,7 +5,7 @@ package detector
 import (
 	"os"
 	"strings"
-	"sync"
+	"time"
 )
 
 // SupportLevel describes how fully a terminal supports an image protocol.
@@ -103,33 +103,22 @@ type probeResult struct {
 	gridSize Size
 }
 
-// Probe runs the zero-cost detection layers concurrently: L1 environment
-// variables, L2 TERM heuristics and L4 ioctl window size.
+// Probe runs the detection layers: L1 environment variables, L2 TERM
+// heuristics and L4 ioctl window size at zero cost, plus L3 DA1/DA2
+// arbitration when L1 and L2 conflict (or both are empty on a TTY). Results
+// are served from and stored to the cross-process cache when possible.
 func (d *Detector) Probe() (*TerminalProfile, error) {
 	env := d.env
+	if entry := loadCache(env); entry != nil {
+		return entry.Profile, nil
+	}
 
-	results := make(chan probeResult, 3)
-	var wg sync.WaitGroup
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		results <- scanEnv(env)
-	}()
-	go func() {
-		defer wg.Done()
-		results <- matchTerm(env)
-	}()
-	go func() {
-		defer wg.Done()
-		results <- probeSystem()
-	}()
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
+	l1 := scanEnv(env)
+	l2 := matchTerm(env)
+	sys := probeSystem()
 
 	merged := probeResult{}
-	for r := range results {
+	for _, r := range []probeResult{l1, l2, sys} {
 		if merged.program == "" {
 			merged.program = r.program
 		}
@@ -141,6 +130,23 @@ func (d *Detector) Probe() (*TerminalProfile, error) {
 		}
 		if r.gridSize.Width > 0 {
 			merged.gridSize = r.gridSize
+		}
+	}
+
+	viaDA := false
+	if env.TTY && needsArbitration(l1.program, l2.program) {
+		if da, err := queryDeviceAttributes(daTimeout); err == nil && da != nil {
+			viaDA = true
+			program, hints := lookupDA2Fingerprint(da.DA2, env)
+			if program != "" {
+				merged.program = program
+			}
+			for _, h := range hints {
+				addHint(&merged.hints, h.Name, h.Level)
+			}
+			if hasDAParam(da.DA1Params, 4) {
+				addHint(&merged.hints, "sixel", SupportStatic)
+			}
 		}
 	}
 
@@ -157,6 +163,7 @@ func (d *Detector) Probe() (*TerminalProfile, error) {
 			addHint(&profile.Protocols, "ansiart", SupportStatic)
 		}
 		addHint(&profile.Protocols, "plain", SupportStatic)
+		storeCache(env, profile, viaDA)
 	}
 	return profile, nil
 }
@@ -220,6 +227,19 @@ func probeSystem() probeResult {
 		r.cellSize = Size{Width: pxW / cols, Height: pxH / rows}
 	}
 	return r
+}
+
+// daTimeout bounds the DA1/DA2 round trip during L3 arbitration.
+const daTimeout = 500 * time.Millisecond
+
+// needsArbitration reports whether L3 DA queries should run: when the L1 and
+// L2 program conclusions conflict, or when both are empty on a TTY (e.g. SSH
+// or tmux with a scrubbed environment).
+func needsArbitration(l1, l2 string) bool {
+	if l1 != "" && l2 != "" {
+		return l1 != l2
+	}
+	return l1 == "" && l2 == ""
 }
 
 func addHint(hints *[]ProtocolHint, name string, level SupportLevel) {
