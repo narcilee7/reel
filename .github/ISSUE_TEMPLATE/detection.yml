@@ -1,0 +1,27 @@
+name: Terminal detection calibration
+description: Wrong protocol detected, missing capabilities, or bad degradation — report raw probe evidence.
+title: "detection: "
+labels: [detection, calibration]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reel detects the terminal via environment variables, TERM heuristics
+        and DA1/DA2 device-attribute queries. If the conclusion is wrong,
+        run `reel probe -template` and paste its output below — the raw DA
+        bytes are what the fingerprint table needs.
+  - type: textarea
+    id: probe
+    attributes:
+      label: "`reel probe -template` output"
+      description: Run `reel probe -template` in the terminal where detection fails and paste the result.
+      render: markdown
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      description: Which protocol/level should have been selected, and what happened instead (wrong protocol, no image, animation missing, ...)?
+    validations:
+      required: true
