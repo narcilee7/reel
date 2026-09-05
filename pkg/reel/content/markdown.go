@@ -1,6 +1,7 @@
 package content
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	_ "image/gif"  // register GIF decoding
@@ -324,6 +325,36 @@ func (m *Markdown) imageFragment(n *ast.Image) protocol.Fragment {
 		return &protocol.TextFragment{Text: "[image: " + alt + "]"}
 	}
 	return &protocol.ImageFragment{Image: img, Alt: alt}
+}
+
+// Link is a hyperlink extracted from a Markdown source.
+type Link struct {
+	URL  string
+	Line int // 0-based source line of the link
+}
+
+// ExtractLinks returns the links of a Markdown source with 0-based line
+// numbers, in document order.
+func ExtractLinks(src []byte) []Link {
+	gm := goldmark.New()
+	doc := gm.Parser().Parse(text.NewReader(src))
+	var out []Link
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		if l, ok := n.(*ast.Link); ok {
+			var line int
+			if c := l.FirstChild(); c != nil {
+				if t, ok := c.(*ast.Text); ok {
+					line = bytes.Count(src[:t.Segment.Start], []byte("\n"))
+				}
+			}
+			out = append(out, Link{URL: string(l.Destination), Line: line})
+		}
+		return ast.WalkContinue, nil
+	})
+	return out
 }
 
 // imageAltText collects the text of an image node's children, which is the

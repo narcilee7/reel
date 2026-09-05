@@ -14,6 +14,7 @@ const (
 	ContentKindImage    = protocol.ContentKindImage
 	ContentKindMarkdown = protocol.ContentKindMarkdown
 	ContentKindChart    = protocol.ContentKindChart
+	ContentKindPDF      = protocol.ContentKindPDF
 )
 
 // Context carries ambient per-render information into Content.ToIR.
@@ -41,6 +42,10 @@ type TextFragment = protocol.TextFragment
 
 // ImageFragment is an inline image and its desired cell rectangle.
 type ImageFragment = protocol.ImageFragment
+
+// AnimationFragment is a moving picture: frames plus optional raw source
+// bytes, degradable to its first frame via StaticOf semantics.
+type AnimationFragment = protocol.AnimationFragment
 
 // Style holds ANSI text styling.
 type Style = protocol.Style

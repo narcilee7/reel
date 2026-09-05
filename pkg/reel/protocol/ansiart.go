@@ -54,8 +54,13 @@ func writeAnsiArt(w io.Writer, ir *IntermediateRep, opts *RenderOptions, quantiz
 		switch t := f.(type) {
 		case *TextFragment:
 			err = writeText(w, t)
-		case *ImageFragment:
-			err = writeAnsiImage(w, t, opts, quantize)
+		case *AnimationFragment:
+			img, _ := StaticOf(t)
+			err = writeAnsiImage(w, img, opts, quantize)
+		default:
+			if img, ok := StaticOf(f); ok {
+				err = writeAnsiImage(w, img, opts, quantize)
+			}
 		}
 		if err != nil {
 			return err

@@ -52,6 +52,14 @@ func New(opts ...Option) *Engine {
 	if proto.Name() == "ansiart" && profile.ColorDepth > 0 && profile.ColorDepth <= 256 {
 		proto = protocol.NewAnsiArt256()
 	}
+	if ac, ok := proto.(protocol.AnimationCapable); ok {
+		if hint, ok2 := profile.Supports("kitty"); ok2 {
+			// Exactly SupportAnimation: kitty ≥0.20 (or assumed-recent via
+			// KITTY_WINDOW_ID). SupportNative terminals (wezterm, ghostty)
+			// keep animation off and degrade to the first frame (§1.5).
+			ac.EnableAnimation(hint.Level == detector.SupportAnimation)
+		}
+	}
 
 	grid := layout.NewGrid(
 		profile.CellSize.Width, profile.CellSize.Height,

@@ -168,13 +168,88 @@ func (d *Detector) Probe() (*TerminalProfile, error) {
 	return profile, nil
 }
 
+// ProbeRaw forces a fresh probe, bypassing the cross-process cache, and runs
+// the L3 DA round whenever a TTY is available — even when L1 and L2 agree —
+// so diagnostics can see the raw responses. The returned DAResult is nil
+// when the query was impossible or failed; that is not an error. The
+// resolution string records where the program conclusion came from: "da2",
+// "env", "term", or "unknown".
+//
+// Unlike Probe, ProbeRaw never writes the cache.
+func (d *Detector) ProbeRaw() (*TerminalProfile, *DAResult, string, error) {
+	env := d.env
+
+	l1 := scanEnv(env)
+	l2 := matchTerm(env)
+	sys := probeSystem()
+
+	merged := probeResult{}
+	for _, r := range []probeResult{l1, l2, sys} {
+		if merged.program == "" {
+			merged.program = r.program
+		}
+		for _, h := range r.hints {
+			addHint(&merged.hints, h.Name, h.Level)
+		}
+		if r.cellSize.Width > 0 {
+			merged.cellSize = r.cellSize
+		}
+		if r.gridSize.Width > 0 {
+			merged.gridSize = r.gridSize
+		}
+	}
+
+	resolution := "unknown"
+	var daRes *DAResult
+	if env.TTY {
+		if da, err := queryDeviceAttributes(daTimeout); err == nil && da != nil {
+			daRes = da
+			program, hints := lookupDA2Fingerprint(da.DA2, env)
+			if program != "" {
+				resolution = "da2"
+				merged.program = program
+			}
+			for _, h := range hints {
+				addHint(&merged.hints, h.Name, h.Level)
+			}
+			if hasDAParam(da.DA1Params, 4) {
+				addHint(&merged.hints, "sixel", SupportStatic)
+			}
+		}
+	}
+	if resolution == "unknown" {
+		switch {
+		case l1.program != "":
+			resolution = "env"
+		case l2.program != "":
+			resolution = "term"
+		}
+	}
+
+	profile := &TerminalProfile{
+		Program:    merged.program,
+		Protocols:  merged.hints,
+		CellSize:   merged.cellSize,
+		GridSize:   merged.gridSize,
+		ColorDepth: colorDepth(env),
+		IsTTY:      env.TTY,
+	}
+	if env.TTY {
+		if profile.ColorDepth >= 256 {
+			addHint(&profile.Protocols, "ansiart", SupportStatic)
+		}
+		addHint(&profile.Protocols, "plain", SupportStatic)
+	}
+	return profile, daRes, resolution, nil
+}
+
 // L1: static environment variable scan.
 func scanEnv(env *Environment) probeResult {
 	var r probeResult
 	switch env.Get("TERM_PROGRAM") {
 	case "kitty":
 		r.program = "kitty"
-		addHint(&r.hints, "kitty", SupportNative)
+		addHint(&r.hints, "kitty", kittyLevel(env))
 	case "ghostty":
 		r.program = "ghostty"
 		addHint(&r.hints, "kitty", SupportNative)
@@ -191,7 +266,7 @@ func scanEnv(env *Environment) probeResult {
 		if r.program == "" {
 			r.program = "kitty"
 		}
-		addHint(&r.hints, "kitty", SupportNative)
+		addHint(&r.hints, "kitty", kittyLevel(env))
 	}
 	if r.program == "" && env.Get("WEZTERM_PANE") != "" {
 		r.program = "wezterm"

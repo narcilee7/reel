@@ -28,6 +28,12 @@ func run(args []string) error {
 		return runCatImg(args[1:])
 	case "md", "catmd":
 		return runCatMd(args[1:])
+	case "read":
+		return runRead(args[1:])
+	case "gallery":
+		return runGallery(args[1:])
+	case "probe":
+		return runProbe(args[1:])
 	case "help", "-h", "--help":
 		internal.PrintUsage(os.Stdout)
 		return nil

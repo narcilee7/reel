@@ -13,15 +13,23 @@ import (
 	"github.com/narcilee7/reel/pkg/reel/protocol"
 )
 
-// Plot margins in pixels, sized for basicfont's 7x13 face.
+// Plot margins in pixels, sized for basicfont's 7x13 face. marginRight
+// widens to marginAxis when a right-axis series exists, symmetric with the
+// left axis labels.
 const (
 	marginTop    = 22
 	marginLeft   = 56
 	marginRight  = 10
+	marginAxis   = 56
 	marginBottom = 22
 )
 
-// seriesPalette colors the series consistently in the drawing and the legend.
+// tickPx is the target pixel spacing between y axis ticks.
+const tickPx = 40
+
+// seriesPalette colors the series consistently in the drawing and the
+// legend. Colors cycle from the 7th series onward — six series is the
+// readability ceiling for terminal charts; more series are a spec problem.
 var seriesPalette = []color.RGBA{
 	{80, 250, 123, 255},  // green
 	{139, 233, 253, 255}, // cyan
@@ -43,44 +51,100 @@ var (
 	gridColor = color.RGBA{68, 71, 90, 255}
 )
 
-// rasterize draws spec onto a width×height RGBA canvas with a transparent
-// background and returns the image plus legend fragments (nil for
-// single-series charts).
-func rasterize(spec ChartSpec, width, height int) (*image.RGBA, []protocol.Fragment, error) {
-	if len(spec.Series) == 0 {
-		return nil, nil, errChartNoSeries
+// niceStep returns the smallest "nice" step (1/2/5 × 10^n) >= rawStep.
+func niceStep(rawStep float64) float64 {
+	if rawStep <= 0 {
+		return 1
 	}
+	mag := math.Pow(10, math.Floor(math.Log10(rawStep)))
+	for _, m := range []float64{1, 2, 5, 10} {
+		if s := m * mag; s >= rawStep {
+			return s
+		}
+	}
+	return 10 * mag
+}
+
+// axisRange computes the nice-ified y axis range for one axis: the raw
+// extent padded for line charts, constrained to include the zero baseline
+// for bar charts, then floored/ceiled to nice step multiples. Ticks start
+// at ymin and advance by step.
+func axisRange(spec ChartSpec, axis int, plotH int) (ymin, ymax, step float64) {
+	lo, hi := math.Inf(1), math.Inf(-1)
+	for _, s := range spec.Series {
+		if s.YAxis != axis {
+			continue
+		}
+		for _, v := range s.Values {
+			lo = math.Min(lo, v)
+			hi = math.Max(hi, v)
+		}
+	}
+	if math.IsInf(lo, 0) {
+		return 0, 1, 1
+	}
+	if spec.Type == ChartBar {
+		lo = math.Min(lo, 0)
+		hi = math.Max(hi, 0)
+	} else {
+		pad := (hi - lo) * 0.05
+		lo -= pad
+		hi += pad
+	}
+	if hi == lo {
+		hi = lo + 1
+	}
+	targetTicks := float64(max(2, plotH/tickPx))
+	step = niceStep((hi - lo) / targetTicks)
+	ymin = math.Floor(lo/step) * step
+	ymax = math.Ceil(hi/step) * step
+	return ymin, ymax, step
+}
+
+// rasterize draws spec onto a width×height RGBA canvas with a transparent
+// background and returns the image plus legend fragments (nil when the
+// chart needs no legend).
+func rasterize(spec ChartSpec, width, height int) (*image.RGBA, []protocol.Fragment, error) {
 	if width < marginLeft+marginRight+20 || height < marginTop+marginBottom+20 {
 		return nil, nil, fmt.Errorf("content: chart area %dx%d too small", width, height)
 	}
 
 	n := len(spec.Labels)
 	if n == 0 {
-		for _, s := range spec.Series {
-			if len(s.Values) > n {
-				n = len(s.Values)
-			}
-		}
+		n = len(spec.Series[0].Values)
 	}
-	if n == 0 {
-		return nil, nil, fmt.Errorf("content: chart has no data points")
-	}
-
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
 	x0, y0 := marginLeft, marginTop
-	x1, y1 := width-marginRight, height-marginBottom
+	x1 := width - marginRight
+	if hasRightAxis(spec) {
+		x1 = width - marginAxis
+	}
+	y1 := height - marginBottom
 
-	ymin, ymax := valueRange(spec)
-	yscale := func(v float64) int {
-		return y1 - int((v-ymin)/(ymax-ymin)*float64(y1-y0))
+	yminL, ymaxL, stepL := axisRange(spec, 0, y1-y0)
+	yminR, ymaxR, stepR := axisRange(spec, 1, y1-y0)
+	yscale := func(axis int) func(float64) int {
+		ymin, ymax := yminL, ymaxL
+		if axis == 1 {
+			ymin, ymax = yminR, ymaxR
+		}
+		return func(v float64) int {
+			return y1 - int((v-ymin)/(ymax-ymin)*float64(y1-y0))
+		}
 	}
 
-	// Horizontal grid lines and y tick labels.
-	for i := 0; i <= 4; i++ {
-		v := ymin + (ymax-ymin)*float64(i)/4
-		y := yscale(v)
+	// Left grid lines and tick labels.
+	for v := yminL; v <= ymaxL; v += stepL {
+		y := yscale(0)(v)
 		drawHLine(img, x0, x1, y, gridColor)
 		drawText(img, fmt.Sprintf("%.4g", v), x0-6, y-6, axisColor, true)
+	}
+	// Right axis ticks (no grid lines), when used.
+	if hasRightAxis(spec) {
+		for v := yminR; v <= ymaxR; v += stepR {
+			y := yscale(1)(v)
+			drawText(img, fmt.Sprintf("%.4g", v), x1+6, y-6, axisColor, false)
+		}
 	}
 	// Axes.
 	drawVLine(img, x0, y0, y1, axisColor)
@@ -88,11 +152,18 @@ func rasterize(spec ChartSpec, width, height int) (*image.RGBA, []protocol.Fragm
 
 	groupW := float64(x1-x0) / float64(n)
 	for i, s := range spec.Series {
+		scale := yscale(s.YAxis)
+		ymin := yminL
+		if s.YAxis == 1 {
+			ymin = yminR
+		}
 		switch spec.Type {
 		case ChartBar:
-			drawBars(img, s.Values[:min(len(s.Values), n)], n, i, len(spec.Series), groupW, x0, y1, yscale, ymin)
+			drawBars(img, s.Values, n, i, len(spec.Series), groupW, x0, y1, scale, ymin)
 		case ChartLine:
-			drawLineSeries(img, s.Values[:min(len(s.Values), n)], n, i, groupW, x0, yscale)
+			drawLineSeries(img, s.Values, n, i, groupW, x0, scale)
+		case ChartScatter:
+			drawScatterPoints(img, s.Values, n, i, groupW, x0, scale)
 		}
 	}
 
@@ -112,10 +183,20 @@ func rasterize(spec ChartSpec, width, height int) (*image.RGBA, []protocol.Fragm
 	return img, legendFragments(spec), nil
 }
 
-// legendFragments builds the "■ name1  ■ name2" legend line for multi-series
-// charts, one styled fragment per series.
+// hasRightAxis reports whether any series is scaled to the right axis.
+func hasRightAxis(spec ChartSpec) bool {
+	for _, s := range spec.Series {
+		if s.YAxis == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// legendFragments builds the "■ name1  ■ name2" legend line whenever the
+// chart has more than one series, or its single series is named.
 func legendFragments(spec ChartSpec) []protocol.Fragment {
-	if len(spec.Series) <= 1 {
+	if len(spec.Series) == 0 || (len(spec.Series) == 1 && spec.Series[0].Name == "") {
 		return nil
 	}
 	var out []protocol.Fragment
@@ -129,45 +210,8 @@ func legendFragments(spec ChartSpec) []protocol.Fragment {
 	return out
 }
 
-// valueRange computes the y axis range: bar charts include the zero baseline,
-// line charts pad the data extent by 5%.
-func valueRange(spec ChartSpec) (ymin, ymax float64) {
-	if spec.Type == ChartBar {
-		ymin = math.Inf(1)
-		ymax = math.Inf(-1)
-		for _, s := range spec.Series {
-			for _, v := range s.Values {
-				ymin = math.Min(ymin, math.Min(v, 0))
-				ymax = math.Max(ymax, math.Max(v, 0))
-			}
-		}
-		if math.IsInf(ymin, 0) {
-			ymin, ymax = 0, 1
-		}
-	} else {
-		ymin = math.Inf(1)
-		ymax = math.Inf(-1)
-		for _, s := range spec.Series {
-			for _, v := range s.Values {
-				ymin = math.Min(ymin, v)
-				ymax = math.Max(ymax, v)
-			}
-		}
-		if math.IsInf(ymin, 0) {
-			ymin, ymax = 0, 1
-		}
-		pad := (ymax - ymin) * 0.05
-		ymin -= pad
-		ymax += pad
-	}
-	if ymax == ymin {
-		ymax = ymin + 1
-	}
-	return ymin, ymax
-}
-
-// drawBars renders one series of grouped bars; the zero baseline comes from
-// yscale(0) (or the plot bottom when ymin >= 0... handled by yscale).
+// drawBars renders one series of grouped bars. The zero baseline comes from
+// yscale(0) (or the plot bottom when the axis minimum is above zero).
 func drawBars(img *image.RGBA, values []float64, n, seriesIdx, numSeries int, groupW float64, x0, y1 int, yscale func(float64) int, ymin float64) {
 	barW := int(groupW)/numSeries - 1
 	if barW < 1 {
@@ -175,9 +219,6 @@ func drawBars(img *image.RGBA, values []float64, n, seriesIdx, numSeries int, gr
 	}
 	c := seriesColor(seriesIdx)
 	for i, v := range values {
-		if i >= n {
-			break
-		}
 		gx := float64(x0) + groupW*float64(i)
 		bx := int(gx) + seriesIdx*(barW+1)
 		yt := yscale(v)
@@ -198,9 +239,6 @@ func drawLineSeries(img *image.RGBA, values []float64, n, seriesIdx int, groupW 
 	c := seriesColor(seriesIdx)
 	px, py := 0, 0
 	for i, v := range values {
-		if i >= n {
-			break
-		}
 		x := int(float64(x0) + groupW*float64(i) + groupW/2)
 		y := yscale(v)
 		if i > 0 {
@@ -208,6 +246,17 @@ func drawLineSeries(img *image.RGBA, values []float64, n, seriesIdx int, groupW 
 		}
 		fillRect(img, x-1, y-1, x+2, y+2, c)
 		px, py = x, y
+	}
+}
+
+// drawScatterPoints renders each value as a 3×3 block; no lines, no
+// interpolation.
+func drawScatterPoints(img *image.RGBA, values []float64, n, seriesIdx int, groupW float64, x0 int, yscale func(float64) int) {
+	c := seriesColor(seriesIdx)
+	for i, v := range values {
+		x := int(float64(x0) + groupW*float64(i) + groupW/2)
+		y := yscale(v)
+		fillRect(img, x-1, y-1, x+2, y+2, c)
 	}
 }
 

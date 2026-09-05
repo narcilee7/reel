@@ -17,9 +17,14 @@ func hasDAParam(params []int, want int) bool {
 func lookupDA2Fingerprint(d2 [3]int, env *Environment) (program string, hints []ProtocolHint) {
 	pv1, pv2, pv3 := d2[0], d2[1], d2[2]
 	switch {
-	case pv1 == 1 && pv2 >= 4000 && pv2 < 5000:
-		// kitty encodes its version as e.g. 4000 for 0.40.0.
-		return "kitty", []ProtocolHint{{Name: "kitty", Level: SupportNative}}
+	case pv1 == 1 && pv2 >= 2000 && pv2 < 10000:
+		// kitty encodes its version as e.g. 4000 for 0.40.0; animation
+		// (a=f/a=a) needs >= 0.20, i.e. pv2 >= 2000.
+		level := SupportNative
+		if pv2 >= 2000 {
+			level = SupportAnimation
+		}
+		return "kitty", []ProtocolHint{{Name: "kitty", Level: level}}
 	case pv1 == 0 && pv2 >= 90 && pv2 <= 99:
 		// iTerm2 answers DA2 with terminal type code 0.
 		return "iterm2", []ProtocolHint{{Name: "iterm2", Level: SupportStatic}}
@@ -32,4 +37,15 @@ func lookupDA2Fingerprint(d2 [3]int, env *Environment) (program string, hints []
 		return "", nil
 	}
 	return "", nil
+}
+
+// kittyLevel returns the support level for a kitty hint from static
+// environment evidence: KITTY_WINDOW_ID implies a recent kitty, so animation
+// support is assumed; otherwise the version is unknown and only native
+// (static) support is claimed.
+func kittyLevel(env *Environment) SupportLevel {
+	if env.Get("KITTY_WINDOW_ID") != "" {
+		return SupportAnimation
+	}
+	return SupportNative
 }

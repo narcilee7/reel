@@ -35,8 +35,13 @@ func (p *sixelProtocol) Write(w io.Writer, ir *IntermediateRep, opts *RenderOpti
 		switch t := f.(type) {
 		case *TextFragment:
 			err = writeText(w, t)
-		case *ImageFragment:
-			err = p.writeImage(w, t, opts)
+		case *AnimationFragment:
+			img, _ := StaticOf(t)
+			err = p.writeImage(w, img, opts)
+		default:
+			if img, ok := StaticOf(f); ok {
+				err = p.writeImage(w, img, opts)
+			}
 		}
 		if err != nil {
 			return err

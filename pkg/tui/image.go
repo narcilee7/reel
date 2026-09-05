@@ -108,6 +108,12 @@ func (m *Image) View() string {
 	return m.seq + strings.Repeat("\n", m.rect.Height-1)
 }
 
+// Close deletes the component's placed images from the terminal, releasing
+// the placements a viewer holds before returning to a previous screen.
+func (m *Image) Close() error {
+	return m.engine.DeleteImages(os.Stdout, m.doc.ImageIDs()...)
+}
+
 // isScrollKey reports whether the key message scrolls content.
 func isScrollKey(msg tea.KeyMsg) bool {
 	switch msg.String() {

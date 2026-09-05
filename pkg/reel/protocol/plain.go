@@ -27,12 +27,20 @@ func (p *plainProtocol) Write(w io.Writer, ir *IntermediateRep, opts *RenderOpti
 		switch t := f.(type) {
 		case *TextFragment:
 			_, err = io.WriteString(w, t.Text)
-		case *ImageFragment:
+		case *AnimationFragment:
 			alt := t.Alt
 			if alt == "" {
-				alt = "image"
+				alt = "animation"
 			}
-			_, err = fmt.Fprintf(w, "[image: %s]\n", alt)
+			_, err = fmt.Fprintf(w, "[animation: %s]\n", alt)
+		default:
+			if img, ok := StaticOf(f); ok {
+				alt := img.Alt
+				if alt == "" {
+					alt = "image"
+				}
+				_, err = fmt.Fprintf(w, "[image: %s]\n", alt)
+			}
 		}
 		if err != nil {
 			return err

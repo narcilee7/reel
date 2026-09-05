@@ -27,6 +27,9 @@ type DAResult struct {
 	// DA2 holds the three DA2 parameters (terminal type code, version,
 	// level). Absent parameters are -1.
 	DA2 [3]int
+	// Raw1/Raw2 hold the unmodified response bytes for diagnostics
+	// (fingerprint calibration). Nil for a response that never arrived.
+	Raw1, Raw2 []byte
 }
 
 // queryDeviceAttributes opens /dev/tty and runs one DA1+DA2 query round.
@@ -71,9 +74,11 @@ func queryDAOnTTY(tty *os.File, timeout time.Duration) (*DAResult, error) {
 	}
 	res := &DAResult{DA2: [3]int{-1, -1, -1}}
 	if da1 != nil {
+		res.Raw1 = da1
 		res.DA1Params = parseDA1(da1)
 	}
 	if da2 != nil {
+		res.Raw2 = da2
 		res.DA2 = parseDA2(da2)
 	}
 	return res, nil

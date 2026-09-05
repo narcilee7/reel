@@ -1,7 +1,9 @@
 package reel
 
 import (
+	"bytes"
 	"io"
+	"strings"
 
 	"github.com/narcilee7/reel/pkg/reel/detector"
 	"github.com/narcilee7/reel/pkg/reel/layout"
@@ -40,8 +42,17 @@ func (e *Engine) Prepare(c Content) (*Document, error) {
 
 	fit := layout.FitOptions{MaxWidth: e.opts.MaxWidth, MaxHeight: e.opts.MaxHeight}
 	for _, f := range ir.Fragments {
-		if img, ok := f.(*protocol.ImageFragment); ok && img.Rect.Width == 0 && img.Rect.Height == 0 {
-			img.Rect = e.grid.Fit(img.Image, fit)
+		// Fit only cares about the first frame's size; both image-class
+		// fragment types share this code path.
+		switch t := f.(type) {
+		case *protocol.ImageFragment:
+			if t.Rect.Width == 0 && t.Rect.Height == 0 {
+				t.Rect = e.grid.Fit(t.Image, fit)
+			}
+		case *protocol.AnimationFragment:
+			if t.Rect.Width == 0 && t.Rect.Height == 0 {
+				t.Rect = e.grid.Fit(t.Image, fit)
+			}
 		}
 	}
 	return &Document{ir: ir, engine: e}, nil
@@ -53,7 +64,7 @@ func (e *Engine) Prepare(c Content) (*Document, error) {
 func (d *Document) Render(w io.Writer) error {
 	n := 0
 	for _, f := range d.ir.Fragments {
-		if _, ok := f.(*protocol.ImageFragment); ok {
+		if _, ok := protocol.StaticOf(f); ok {
 			n++
 		}
 	}
@@ -83,8 +94,11 @@ func (d *Document) Render(w io.Writer) error {
 func (d *Document) ReFit(g *layout.Grid) {
 	fit := layout.FitOptions{MaxWidth: d.engine.opts.MaxWidth, MaxHeight: d.engine.opts.MaxHeight}
 	for _, f := range d.ir.Fragments {
-		if img, ok := f.(*protocol.ImageFragment); ok {
-			img.Rect = g.Fit(img.Image, fit)
+		switch t := f.(type) {
+		case *protocol.ImageFragment:
+			t.Rect = g.Fit(t.Image, fit)
+		case *protocol.AnimationFragment:
+			t.Rect = g.Fit(t.Image, fit)
 		}
 	}
 }
@@ -101,9 +115,68 @@ func (d *Document) ImageIDs() []uint32 {
 // fragment (zero when the document contains no images).
 func (d *Document) ImageRect() CellRect {
 	for _, f := range d.ir.Fragments {
-		if img, ok := f.(*protocol.ImageFragment); ok {
+		if img, ok := protocol.StaticOf(f); ok {
 			return img.Rect
 		}
 	}
 	return CellRect{}
+}
+
+// RenderLines renders the document to w and returns its content as terminal
+// rows for inline TUI embedding: text fragments contribute their lines, and
+// image-class fragments occupy Rect.Height rows each (escape sequence on the
+// first row, then blank rows). Joining the rows with "\n" yields the
+// document's view; len(rows) is its visual height.
+//
+// The byte stream is identical to Render: fragments are rendered one at a
+// time, which yields the same placement id sequence because each
+// single-fragment write assigns its image the current PlacementBase.
+func (d *Document) RenderLines(w io.Writer) ([]string, error) {
+	e := d.engine
+	n := 0
+	for _, f := range d.ir.Fragments {
+		if _, ok := protocol.StaticOf(f); ok {
+			n++
+		}
+	}
+	if n > 0 {
+		e.opts.PlacementBase = e.placementID + 1
+	} else {
+		e.opts.PlacementBase = 0
+	}
+
+	var lines []string
+	for _, f := range d.ir.Fragments {
+		img, isImage := protocol.StaticOf(f)
+		var buf bytes.Buffer
+		if err := e.proto.Write(&buf, &protocol.IntermediateRep{Fragments: []protocol.Fragment{f}}, &e.opts); err != nil {
+			return nil, err
+		}
+		fl := splitLines(buf.String())
+		if isImage {
+			for len(fl) < img.Rect.Height {
+				fl = append(fl, "")
+			}
+		}
+		lines = append(lines, fl...)
+	}
+
+	if n > 0 {
+		d.imgIDs = make([]uint32, n)
+		for i := range d.imgIDs {
+			d.imgIDs[i] = e.opts.PlacementBase + uint32(i)
+		}
+		e.placementID += uint32(n)
+	}
+	return lines, nil
+}
+
+// splitLines splits s on newlines, dropping one trailing empty line produced
+// by a final newline.
+func splitLines(s string) []string {
+	parts := strings.Split(s, "\n")
+	if len(parts) > 1 && parts[len(parts)-1] == "" {
+		parts = parts[:len(parts)-1]
+	}
+	return parts
 }

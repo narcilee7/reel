@@ -11,6 +11,7 @@ import (
 	"image"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/narcilee7/reel/pkg/reel/detector"
 	"github.com/narcilee7/reel/pkg/reel/layout"
@@ -23,6 +24,7 @@ const (
 	ContentKindImage ContentKind = iota
 	ContentKindMarkdown
 	ContentKindChart
+	ContentKindPDF
 )
 
 func (k ContentKind) String() string {
@@ -33,6 +35,8 @@ func (k ContentKind) String() string {
 		return "markdown"
 	case ContentKindChart:
 		return "chart"
+	case ContentKindPDF:
+		return "pdf"
 	default:
 		return "unknown"
 	}
@@ -115,8 +119,70 @@ type ImageFragment struct {
 	Rect  layout.CellRect
 }
 
-func (*TextFragment) fragmentTag()  {}
-func (*ImageFragment) fragmentTag() {}
+// AnimationFragment is a "moving picture": the protocol-agnostic animation
+// intermediate representation. Everything a static view needs (first frame,
+// alt, cell rectangle) is self-contained in this type and does not depend on
+// ImageFragment.
+type AnimationFragment struct {
+	// Image is the first frame: the entry point for layout.Fit sizing,
+	// capability degradation and any path without raw source bytes.
+	Image image.Image
+	Alt   string
+	Rect  layout.CellRect
+
+	// Frames holds all frames (Frames[0] always equals Image); Delay[i] is
+	// the display duration of Frames[i]. An AnimationFragment with fewer
+	// than 2 frames is invalid (the constructor guarantees this, see
+	// content.Image.ToIR).
+	Frames []image.Image
+	Delay  []time.Duration
+
+	// Source/SourceMIME are the optional original file bytes (e.g. a whole
+	// GIF file). When non-empty the AnimationFragment implements RawSourcer
+	// (see below) for protocols that can embed native files. An empty
+	// Source does not degrade the animation itself; it only affects the
+	// iterm2 path.
+	Source     []byte
+	SourceMIME string
+}
+
+// RawSource returns the original file bytes and MIME type, implementing the
+// RawSourcer optional capability.
+func (f *AnimationFragment) RawSource() ([]byte, string) { return f.Source, f.SourceMIME }
+
+func (*TextFragment) fragmentTag()      {}
+func (*ImageFragment) fragmentTag()     {}
+func (*AnimationFragment) fragmentTag() {}
+
+// StaticOf folds any image-class fragment into its static view: an
+// ImageFragment is returned as-is; an AnimationFragment yields an
+// ImageFragment view of its first frame. Protocol non-animation paths must
+// go through it, so "not recognizing animation" is always equivalent to
+// "rendering the first frame", never to "ignoring".
+func StaticOf(f Fragment) (*ImageFragment, bool) {
+	switch t := f.(type) {
+	case *ImageFragment:
+		return t, true
+	case *AnimationFragment:
+		return &ImageFragment{Image: t.Image, Alt: t.Alt, Rect: t.Rect}, true
+	}
+	return nil, false
+}
+
+// RawSourcer is an optional Fragment capability: it provides the original
+// file bytes and MIME type for protocols that can embed native-format files
+// (iTerm2 embedding animated GIFs). Assert, don't require — when a Fragment
+// does not implement it, protocols fall back to pixel frames.
+type RawSourcer interface {
+	RawSource() (data []byte, mime string)
+}
+
+// AnimationCapable is an optional Protocol capability (asserted like
+// ImageDeleter): it declares whether this instance may safely use
+// terminal-driven animation. The Engine calls it after Select, based on the
+// profile hint level; when not implemented, or set false, the protocol
+// layer degrades to the StaticOf first frame.
+type AnimationCapable interface{ EnableAnimation(bool) }
 
 // RenderOptions controls how a protocol renders an IR.
 type RenderOptions struct {
